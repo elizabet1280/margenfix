@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MargenFix — Ajuste Milimétrico de Impresión</title>
+  <!-- Tailwind CSS para diseño limpio -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- pdf-lib para manipular PDFs en el navegador -->
+  <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+  <!-- pdf.js para previsualizar y convertir PDF a imagen -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script>
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  </script>
+</head>
+<body class="bg-slate-50 text-slate-800 min-h-screen flex flex-col items-center justify-center p-4">
+
+  <div class="max-w-xl w-full bg-white rounded-2xl shadow-lg border border-slate-200 p-6 space-y-6">
+    <!-- Cabecera -->
+    <div class="border-b border-slate-100 pb-4">
+      <h1 class="text-2xl font-bold text-slate-900">MargenFix</h1>
+      <p class="text-sm text-slate-500">Desplaza el contenido de tus archivos A4/A5 unos milímetros a la derecha para impresión.</p>
+    </div>
+
+    <!-- 1. Subir Archivo -->
+    <div>
+      <label class="block text-sm font-semibold text-slate-700 mb-2">1. Sube tu archivo (PDF, PNG o JPG)</label>
+      <input type="file" id="fileInput" accept=".pdf, .png, .jpg, .jpeg"
+        class="block w-full text-sm text-slate-500 file:mr-4 file:py-2.5 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 border border-slate-200 rounded-lg cursor-pointer"/>
+    </div>
+
+    <!-- 2. Configuración -->
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+      <div>
+        <label class="block text-sm font-semibold text-slate-700 mb-1">2. Desplazamiento (mm)</label>
+        <div class="flex items-center space-x-2">
+          <input type="number" id="offsetMm" value="3" step="0.5" min="-50" max="50"
+            class="w-full border border-slate-300 rounded-lg px-3 py-2 text-slate-900 font-medium focus:outline-none focus:ring-2 focus:ring-blue-500"/>
+          <span class="text-sm text-slate-500 font-medium">mm</span>
+        </div>
+        <p class="text-xs text-slate-400 mt-1">Positivo = derecha | Negativo = izquierda</p>
+      </div>
+
+      <div>
+        <label class="block text-sm font-semibold text-slate-700 mb-1">3. Formato de salida</label>
+        <select id="outputFormat"
+          class="w-full border border-slate-300 rounded-lg px-3 py-2 text-slate-900 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <option value="same">Mantener formato original</option>
+          <option value="pdf">PDF (Ideal para múltiples hojas)</option>
+          <option value="png">PNG (Alta calidad sin pérdida)</option>
+          <option value="jpg">JPG (Ligero)</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Vista Previa Rápida (Primera página / imagen) -->
+    <div id="previewContainer" class="hidden space-y-2">
+      <div class="flex justify-between items-center">
+        <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">Vista previa (Página 1)</span>
+        <span id="pageCountBadge" class="text-xs bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full"></span>
+      </div>
+      <div class="border border-slate-200 rounded-lg bg-slate-100 p-2 flex justify-center overflow-hidden">
+        <canvas id="previewCanvas" class="max-h-64 shadow-sm bg-white"></canvas>
+      </div>
+    </div>
+
+    <!-- Botón de Descarga -->
+    <button id="processBtn" disabled
+      class="w-full py-3 px-4 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-semibold rounded-xl shadow transition">
+      Procesar y Descargar
+    </button>
+
+    <p id="statusMsg" class="text-center text-sm text-slate-500 hidden"></p>
+  </div>
+
+  <script>
+    const fileInput = document.getElementById('fileInput');
+    const offsetMmInput = document.getElementById('offsetMm');
+    const outputFormatSelect = document.getElementById('outputFormat');
+    const processBtn = document.getElementById('processBtn');
+    const previewContainer = document.getElementById('previewContainer');
+    const previewCanvas = document.getElementById('previewCanvas');
+    const pageCountBadge = document.getElementById('pageCountBadge');
+    const statusMsg = document.getElementById('statusMsg');
+
+    let currentFile = null;
+    let fileType = null; // 'pdf' | 'image'
+    let loadedImage = null;
+    let pdfArrayBuffer = null;
+
+    // Conversión: 1 pulgada = 25.4 mm | PDF usa 72 puntos por pulgada
+    const MM_TO_PT = 72 / 25.4;
+
+    fileInput.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      currentFile = file;
+      processBtn.disabled = false;
+      previewContainer.classList.remove('hidden');
+
+      if (file.type === 'application/pdf') {
+        fileType = 'pdf';
+        pdfArrayBuffer = await file.arrayBuffer();
+        await renderPdfPreview();
+      } else if (file.type.startsWith('image/')) {
+        fileType = 'image';
+        pageCountBadge.textContent = '1 imagen';
+        const img = new Image();
+        img.onload = () => {
+          loadedImage = img;
+          renderImagePreview();
+        };
+        img.src = URL.createObjectURL(file);
+      }
+    });
+
+    offsetMmInput.addEventListener('input', () => {
+      if (!currentFile) return;
+      if (fileType === 'image') renderImagePreview();
+      if (fileType === 'pdf') renderPdfPreview();
+    });
+
+    function renderImagePreview() {
+      if (!loadedImage) return;
+      const ctx = previewCanvas.getContext('2d');
+      previewCanvas.width = loadedImage.width;
+      previewCanvas.height = loadedImage.height;
+
+      // Asumimos resolución estándar A4 (210mm de ancho) para calcular proporción en pantalla
+      const pxPerMm = loadedImage.width / 210;
+      const shiftPx = parseFloat(offsetMmInput.value || 0) * pxPerMm;
+
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, previewCanvas.width, previewCanvas.height);
+      ctx.drawImage(loadedImage, shiftPx, 0);
+    }
+
+    async function renderPdfPreview() {
+      if (!pdfArrayBuffer) return;
+      const loadingTask = pdfjsLib.getDocument({ data: pdfArrayBuffer.slice(0) });
+      const pdf = await loadingTask.promise;
+      pageCountBadge.textContent = `${pdf.numPages} página(s)`;
+
+      const page = await pdf.getPage(1);
+      const viewport = page.getViewport({ scale: 1.5 });
+      const ctx = previewCanvas.getContext('2d');
+      previewCanvas.width = viewport.width;
+      previewCanvas.height = viewport.height;
+
+      // Calcular desplazamiento proporcional a puntos PDF (72 DPI * scale 1.5)
+      const shiftPx = parseFloat(offsetMmInput.value || 0) * MM_TO_PT * 1.5;
+
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, previewCanvas.width, previewCanvas.height);
+
+      ctx.save();
+      ctx.translate(shiftPx, 0);
+      await page.render({ canvasContext: ctx, viewport: viewport }).promise;
+      ctx.restore();
+    }
+
+    processBtn.addEventListener('click', async () => {
+      if (!currentFile) return;
+      statusMsg.classList.remove('hidden');
+      statusMsg.textContent = 'Procesando archivo...';
+      processBtn.disabled = true;
+
+      try {
+        const shiftMm = parseFloat(offsetMmInput.value || 0);
+        let targetFormat = outputFormatSelect.value;
+        if (targetFormat === 'same') {
+          targetFormat = fileType === 'pdf' ? 'pdf' : (currentFile.type === 'image/png' ? 'png' : 'jpg');
+        }
+
+        if (fileType === 'pdf' && targetFormat === 'pdf') {
+          await exportShiftedPdf(shiftMm);
+        } else if (fileType === 'image' && (targetFormat === 'png' || targetFormat === 'jpg')) {
+          exportShiftedImage(shiftMm, targetFormat);
+        } else if (fileType === 'image' && targetFormat === 'pdf') {
+          await exportImageAsPdf(shiftMm);
+        } else if (fileType === 'pdf' && (targetFormat === 'png' || targetFormat === 'jpg')) {
+          await exportPdfPagesAsImages(shiftMm, targetFormat);
+        }
+
+        statusMsg.textContent = '¡Listo! Archivo descargado.';
+      } catch (err) {
+        console.error(err);
+        statusMsg.textContent = 'Ocurrió un error al procesar el archivo.';
+      } finally {
+        processBtn.disabled = false;
+      }
+    });
+
+    // 1. PDF -> PDF (Mantiene vectores intactos y mueve todas las páginas)
+    async function exportShiftedPdf(shiftMm) {
+      const { PDFDocument } = PDFLib;
+      const srcDoc = await PDFDocument.load(pdfArrayBuffer);
+      const newDoc = await PDFDocument.create();
+      const shiftPt = shiftMm * MM_TO_PT;
+
+      const pages = srcDoc.getPages();
+      for (let i = 0; i < pages.length; i++) {
+        const srcPage = pages[i];
+        const { width, height } = srcPage.getSize();
+        const embeddedPage = await newDoc.embedPage(srcPage);
+        const newPage = newDoc.addPage([width, height]);
+        newPage.drawPage(embeddedPage, {
+          x: shiftPt,
+          y: 0,
+          width: width,
+          height: height
+        });
+      }
+
+      const pdfBytes = await newDoc.save();
+      downloadBlob(new Blob([pdfBytes], { type: 'application/pdf' }), `ajustado_${currentFile.name}`);
+    }
+
+    // 2. Imagen -> Imagen (PNG/JPG)
+    function exportShiftedImage(shiftMm, format) {
+      const canvas = document.createElement('canvas');
+      canvas.width = loadedImage.width;
+      canvas.height = loadedImage.height;
+      const ctx = canvas.getContext('2d');
+
+      const pxPerMm = loadedImage.width / 210; // Base A4
+      const shiftPx = shiftMm * pxPerMm;
+
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(loadedImage, shiftPx, 0);
+
+      const mime = format === 'png' ? 'image/png' : 'image/jpeg';
+      canvas.toBlob((blob) => {
+        const baseName = currentFile.name.replace(/\.[^/.]+$/, "");
+        downloadBlob(blob, `ajustado_${baseName}.${format}`);
+      }, mime, 0.95);
+    }
+
+    // 3. Imagen -> PDF
+    async function exportImageAsPdf(shiftMm) {
+      const { PDFDocument } = PDFLib;
+      const pdfDoc = await PDFDocument.create();
+      const shiftPt = shiftMm * MM_TO_PT;
+
+      // Crear página tamaño A4 estándar en puntos (595.28 x 841.89)
+      const page = pdfDoc.addPage([595.28, 841.89]);
+      const imgBytes = await currentFile.arrayBuffer();
+      const embeddedImg = currentFile.type === 'image/png'
+        ? await pdfDoc.embedPng(imgBytes)
+        : await pdfDoc.embedJpg(imgBytes);
+
+      page.drawImage(embeddedImg, {
+        x: shiftPt,
+        y: 0,
+        width: 595.28,
+        height: 841.89
+      });
+
+      const pdfBytes = await pdfDoc.save();
+      const baseName = currentFile.name.replace(/\.[^/.]+$/, "");
+      downloadBlob(new Blob([pdfBytes], { type: 'application/pdf' }), `ajustado_${baseName}.pdf`);
+    }
+
+    // 4. PDF -> Imagen (Descarga cada página ajustada)
+    async function exportPdfPagesAsImages(shiftMm, format) {
+      const loadingTask = pdfjsLib.getDocument({ data: pdfArrayBuffer.slice(0) });
+      const pdf = await loadingTask.promise;
+      const scale = 300 / 72; // 300 DPI calidad impresión
+      const shiftPx = shiftMm * MM_TO_PT * scale;
+      const mime = format === 'png' ? 'image/png' : 'image/jpeg';
+      const baseName = currentFile.name.replace(/\.[^/.]+$/, "");
+
+      for (let i = 1; i <= pdf.numPages; i++) {
+        const page = await pdf.getPage(i);
+        const viewport = page.getViewport({ scale });
+        const canvas = document.createElement('canvas');
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        const ctx = canvas.getContext('2d');
+
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.save();
+        ctx.translate(shiftPx, 0);
+        await page.render({ canvasContext: ctx, viewport }).promise;
+        ctx.restore();
+
+        await new Promise(resolve => {
+          canvas.toBlob((blob) => {
+            downloadBlob(blob, `${baseName}_pag${i}.${format}`);
+            resolve();
+          }, mime, 0.95);
+        });
+      }
+    }
+
+    function downloadBlob(blob, filename) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+  </script>
+</body>
+</html>
